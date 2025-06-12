@@ -27,12 +27,10 @@ import network
 import time
 from umqtt.robust import MQTTClient
 import os
-#import gc
 import sys
-
-import tcs34725
+from math import floor
 import read_temp
-from machine import I2C, Pin, ADC
+from machine import I2C, Pin, ADC, PWM
 
 def color_rgb_bytes(color_raw):
     """Read the RGB color detected by the sensor.  Returns a 3-tuple of
@@ -57,8 +55,6 @@ def color_rgb_bytes(color_raw):
     return (red, green, blue)
 
 ### OD stuff
-jakobs_led = Pin(12, Pin.OUT)
-jakobs_led.value(1)
 led = Pin(27, Pin.OUT)
 # Turn it ON (set HIGH)
 led.value(1)
@@ -66,11 +62,19 @@ pwr = Pin(14, Pin.OUT)
 pwr.value(1)  # Turn GPIO14 HIGH to "power" sensor
 
 # Define I2C
-i2c = I2C(0, scl=Pin(22), sda=Pin(23))  # Adjust pins as needed
-sensor = tcs34725.TCS34725(i2c)
+#i2c = I2C(0, scl=Pin(22), sda=Pin(23))  # Adjust pins as needed
+#sensor = tcs34725.TCS34725(i2c)
 
 led_ctrl = Pin(33, Pin.OUT)
 led_ctrl.value(0)
+
+###Pumps
+
+PUMP_A = PWM(Pin(26, Pin.OUT)) # A0
+PUMP_B = PWM(Pin(25, Pin.OUT)) # A1
+
+def set_pump_rate(pump, rate):
+    pump.duty_u16(floor(rate*655.35))
 
 ###Web
 
@@ -79,7 +83,7 @@ def cb(topic, msg):
         slider_value = msg.decode('utf-8')
         print('Slider value received:', slider_value)
 
-        # You can use slider_value to control something (e.g., LED brightness, motor speed)
+        set_pump_rate(PUMP_B, int(msg))
         
     except Exception as e:
         print('Error processing slider value:', e)
@@ -124,13 +128,13 @@ mqtt_client_id = bytes('client_'+str(random_num), 'utf-8')
 #         (about 1/4 of the micropython heap on the ESP8266 platform)
 ADAFRUIT_IO_URL = b'io.adafruit.com' 
 ADAFRUIT_USERNAME = b'MC65'
-ADAFRUIT_IO_KEY = b'aio_lNBG33noC0OfwNIsl2QYZkvkVQbQ'
 
 client = MQTTClient(client_id=mqtt_client_id, 
                     server=ADAFRUIT_IO_URL, 
                     user=ADAFRUIT_USERNAME, 
                     password=ADAFRUIT_IO_KEY,
-                    ssl=False)
+                    ssl=False,
+                    port=1883)
 try:       
     client.connect()
     print('Connected to client')
@@ -150,6 +154,8 @@ mqtt_feedname_out = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'out-test
 client.set_callback(cb)
 client.subscribe(mqtt_feedname_out)
 PUBLISH_PERIOD_IN_SEC = 10
+SUBSCRIBE_CHECK_PERIOD_IN_SEC = 0.5 
+accum_time = PUBLISH_PERIOD_IN_SEC
 
 ###init thermistor
 temp_sens = read_temp.init_temp_sensor()
@@ -158,20 +164,26 @@ temp_sens = read_temp.init_temp_sensor()
 print('Publishing..')
 while True:
     try:
-        # Read temperature
-        temp = read_temp.read_temp(temp_sens)
+        if accum_time>=PUBLISH_PERIOD_IN_SEC:
+            # Read temperature
+            temp = read_temp.read_temp(temp_sens)
+            print("Recorded temperature:", temp)
 
-        # Read color sensor
-        r,g,b = color_rgb_bytes(sensor.read(True))
+            # Read color sensor
+            #r,g,b = color_rgb_bytes(sensor.read(True))
+            #print("RGB values:", r,g,b)
+            
+            client.publish(mqtt_feedname_temp, bytes(str(temp), 'utf-8'), qos=0)
+            #client.publish(mqtt_feedname_OD_r, bytes(str(r), 'utf-8'), qos=0)
+            #client.publish(mqtt_feedname_OD_g, bytes(str(g), 'utf-8'), qos=0)
+            #client.publish(mqtt_feedname_OD_b, bytes(str(b), 'utf-8'), qos=0)
+
+            accum_time = 0
         
-        client.publish(mqtt_feedname_temp, bytes(str(temp), 'utf-8'), qos=0)
-        client.publish(mqtt_feedname_OD_r, bytes(str(r), 'utf-8'), qos=0)
-        client.publish(mqtt_feedname_OD_g, bytes(str(g), 'utf-8'), qos=0)
-        client.publish(mqtt_feedname_OD_b, bytes(str(b), 'utf-8'), qos=0)
-
         client.check_msg()
         
-        time.sleep(PUBLISH_PERIOD_IN_SEC)
+        time.sleep(SUBSCRIBE_CHECK_PERIOD_IN_SEC)
+        accum_time += SUBSCRIBE_CHECK_PERIOD_IN_SEC
     except KeyboardInterrupt:
         print('Ctrl-C pressed...exiting')
         client.disconnect()
