@@ -168,7 +168,6 @@ while True:
         client.publish(mqtt_feedname_OD_r, bytes(str(r), 'utf-8'), qos=0)
         client.publish(mqtt_feedname_OD_g, bytes(str(g), 'utf-8'), qos=0)
         client.publish(mqtt_feedname_OD_b, bytes(str(b), 'utf-8'), qos=0)
-        print('this runs')
 
         client.check_msg()
         
