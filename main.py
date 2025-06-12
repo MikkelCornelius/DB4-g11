@@ -128,6 +128,7 @@ mqtt_client_id = bytes('client_'+str(random_num), 'utf-8')
 #         (about 1/4 of the micropython heap on the ESP8266 platform)
 ADAFRUIT_IO_URL = b'io.adafruit.com' 
 ADAFRUIT_USERNAME = b'MC65'
+ADAFRUIT_IO_KEY = b'abc'
 
 client = MQTTClient(client_id=mqtt_client_id, 
                     server=ADAFRUIT_IO_URL, 
