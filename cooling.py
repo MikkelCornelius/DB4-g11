@@ -4,14 +4,12 @@ from micropython import const
 import time
 
 PUMP_A = PWM(Pin(26, Pin.OUT)) # A0
-PUMP_B = PWM(Pin(25, Pin.OUT)) # A1
-PUMP_B.duty_u16(0)
 
 # Modified function for 12V diaphragm pumps
 def set_pump_rate(pump, rate):
     # Scale rate to account for 50% minimum threshold
     # rate should be 0-65535, but effective range is 40-100%
-    if rate <= 48214:  # 50% of 65535
+    if rate <= 45214:  # 50% of 65535
         pump.duty_u16(0)  # Turn off pump below 40%
     else:
         pump.duty_u16(rate)
@@ -19,7 +17,7 @@ def set_pump_rate(pump, rate):
 TEMPERATURE_PIN = 32
 
 class TemperatureSystem:
-    def __init__(self):        
+    def __init__(self):
         self.TEMP_SENS_ADC_PIN_NO = TEMPERATURE_PIN
         self.NOM_RES = 9700 # Thermistor resistance at room temperature
         self.SER_RES = 10000  # Serial resistor resistance
@@ -44,13 +42,10 @@ class TemperatureSystem:
 
         # Average of the NUM_SAMPLES and look it up in the table
         raw_average = sum(raw_read)/self.NUM_SAMPLES
-        #print('raw_avg = ' + str(raw_average))
-        #print('V_measured = ' + str(adc_V_lookup[round(raw_average)]))
 
         # Convert to resistance
         raw_average = self.ADC_MAX * self.adc_V_lookup[round(raw_average)]/self.ADC_Vmax
         resistance = (self.SER_RES * raw_average) / (self.ADC_MAX - raw_average)
-        #print('Thermistor resistance: {} ohms'.format(resistance))
 
         # Convert to temperature
         steinhart  = log(resistance / self.NOM_RES) / self.THERM_B_COEFF
@@ -70,14 +65,12 @@ MAX_DUTY_CYCLE = const(1.0)  # Maximum duty cycle (100%)
 LOW_POWER_MAX = const(0.5)   # Switch to high power when needed power > 50%
 HIGH_POWER_MIN = const(0.3)  # Switch back to low power when needed power < 30%
 
-MAX_CONTINUOUS_RUN_TIME = const(3600*100)  # 1 hour in milliseconds
-MIN_DEFROST_TIME = const(180*100)        # 5 minutes minimum off time
-
 # PID Constants
 KP = const(1)
 KI = const(0.0001)
-KD = const(0)
+KD = const(0) #set to 0 because of the high level of noise from the temperature sensor
 Imax = 1
+target_temperature = 17
 
 class CoolingSystem(TemperatureSystem):
     def __init__(self, TemperatureSystem):
@@ -93,11 +86,6 @@ class CoolingSystem(TemperatureSystem):
         self.last_error = 0
         self.integral = 0
         self.last_time = 0
-
-        # self.last_run_start = 0
-        # self.continuous_run_time = 0
-        # self.force_off_until = 0
-        # self.anti_freeze_active = False
 
         #for the running function
         TemperatureSystem.__init__(self)
@@ -116,10 +104,9 @@ class CoolingSystem(TemperatureSystem):
         # Integral term (only active near setpoint + clamped to ±1)
         if abs(error) <= 1.2:  # Only integrate if within 1.2°C of target
             self.integral += error * dt
-            self.integral = max(min(self.integral, 1.0), -1.0)  # Hard clamp to ±1
-        else:
-            self.integral = 0  # Reset if outside the range
 
+        I = KI * self.integral
+        I = max(min(I, 1.0), -1.0) # Hard clamp to ±1
         I = KI * self.integral
 
         # Derivative term
@@ -129,18 +116,12 @@ class CoolingSystem(TemperatureSystem):
         PID = P + I + D
         output = max(-0.5, min(1, PID))  # Clamp to 0-1 range
 
-        #P_values.append(P)
-        #I_values.append(I)
-        #D_values.append(D)
-
         # Update state
         self.last_error = error
         self.last_time = now
-        #print(f"PID constants {KP, KI, KD}")
-        #print(f"PID value {output}, P + I + D {P, I, D, PID}")
 
         return output, PID, P, I
-    
+
     def disable_cooling_system(self):
         for relay in self.relays_on:
             relay.off()
@@ -159,44 +140,16 @@ class CoolingSystem(TemperatureSystem):
         elif self.current_power_mode == 'high' or 'eco':
             relays_on = [self.relay1, self.relay2]
 
-        # Simple duty cycle implementation (for real application, use timers)
-        # This is a simplified version - in practice you'd want to use proper timing
-        cycle_time = 10  # seconds (adjust based on your needs)
+        # Duty cycle implementation
+        cycle_time = 10  # seconds
         on_time = cycle_time * self.duty_cycle
 
         for relay in relays_on:
             relay.on()
 
     def set_cooling(self, required_power, PID):
-        #power_mode_values.append(self.current_power_mode)
 
-        """Set cooling system with anti-freeze protection"""
         now = time.ticks_ms()
-
-        # # Check if we're in forced off period
-        # if now < self.force_off_until:
-        #     if self.current_power_mode != 'off':
-        #         self.relay1.off()
-        #         self.relay2.off()
-        #         self.current_power_mode = 'off'
-        #         print("Anti-freeze: Cooling forced off")
-        #     return
-
-        # Track continuous run time
-        # if self.current_power_mode != 'off':
-        #     self.continuous_run_time = time.ticks_diff(now, self.last_run_start)
-        #     if self.continuous_run_time >= MAX_CONTINUOUS_RUN_TIME:
-        #         self.anti_freeze_active = True
-        #         self.force_off_until = now + MIN_DEFROST_TIME
-        #         self.relay1.off()
-        #         self.relay2.off()
-        #         self.current_power_mode = 'off'
-        #         print(f"Anti-freeze: Max run time reached ({MAX_CONTINUOUS_RUN_TIME/3600000}h), cooling disabled for {MIN_DEFROST_TIME/3600000}h")
-        #         return
-        # else:
-        #     self.last_run_start = now
-        #     self.continuous_run_time = 0
-        #     self.anti_freeze_active = False
 
         # Original power mode selection logic
         new_power_mode = self.current_power_mode
@@ -207,7 +160,7 @@ class CoolingSystem(TemperatureSystem):
             elif required_power > LOW_POWER_MAX and self.current_power_mode != 'eco':
                 if PID <= 2.3:
                     new_power_mode = 'eco'
-            elif required_power < HIGH_POWER_MIN and self.current_power_mode != 'low':
+            elif -0.3 < required_power < HIGH_POWER_MIN and self.current_power_mode != 'low':
                 new_power_mode = 'low'
             elif required_power <= -0.3:
                 new_power_mode = 'off'
@@ -216,16 +169,13 @@ class CoolingSystem(TemperatureSystem):
         if new_power_mode != self.current_power_mode:
             self.current_power_mode = new_power_mode
             self.last_switch_time = now
-            print(f"Switching to {self.current_power_mode} power mode")
 
-#CHANGES HERE
         # Calculate and apply duty cycle (from previous implementation)
         if self.current_power_mode == 'off':
             effective_power = 0
             self.duty_cycle = 0
             set_pump_rate(PUMP_A, 0)
             print("pump off")
-        # DON'T CHANGE THE PUMP RATES
         elif self.current_power_mode == 'low':
             effective_power = min(required_power / LOW_POWER_MAX, 1.0)
             self.duty_cycle = max(MIN_DUTY_CYCLE, effective_power)
@@ -256,10 +206,4 @@ class CoolingSystem(TemperatureSystem):
         output, pid, P_values, I_values = self.pid_control(current_temperature, target_temperature)
         power_mode_values = self.set_cooling(round(output, 1), pid)
 
-        # Record data
-        #time_points.append(elapsed)
-        #pid_values.append(output)
-        #temperature_points.append(current_temperature)
-
         return output, P_values, I_values, power_mode_values, current_temperature
-

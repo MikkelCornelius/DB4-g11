@@ -76,7 +76,14 @@ async def pump_volume(pump, vol):
 def Conc_from_OD(Blue):
     return -114.9880 * Blue + 248932.3866
 
-### OD stuff
+def set_pump_rate(pump, rate):
+    # Scale rate to account for 40% minimum threshold
+    # rate should be 0-65535, but effective range is 40-100%
+    if rate <= 26214:  # 40% of 65535
+        pump.duty_u16(0)  # Turn off pump below 40%
+    else:
+        pump.duty_u16(rate)
+
 # Initialize control pins
 led = Pin(27, Pin.OUT)
 led_ctrl = Pin(33, Pin.OUT)
@@ -89,18 +96,9 @@ led.value(1)
 pwr_rgb.value(1)
 blue_led.value(1)
 
-###Pumps
-
+#Pumps
 PUMP_A = PWM(Pin(26, Pin.OUT)) # A0
 PUMP_B = PWM(Pin(25, Pin.OUT)) # A1
-
-def set_pump_rate(pump, rate):
-    # Scale rate to account for 40% minimum threshold
-    # rate should be 0-65535, but effective range is 40-100%
-    if rate <= 26214:  # 40% of 65535
-        pump.duty_u16(0)  # Turn off pump below 40%
-    else:
-        pump.duty_u16(rate)
 
 ###Web
 
@@ -137,11 +135,6 @@ random_num = int.from_bytes(os.urandom(3), 'little')
 mqtt_client_id = bytes('client_'+str(random_num), 'utf-8')
 
 # connect to Adafruit IO MQTT broker using unsecure TCP (port 1883)
-# 
-# To use a secure connection (encrypted) with TLS: 
-#   set MQTTClient initializer parameter to "ssl=True"
-#   Caveat: a secure connection uses about 9k bytes of the heap
-#         (about 1/4 of the micropython heap on the ESP8266 platform)
 ADAFRUIT_IO_URL = b'io.adafruit.com' 
 ADAFRUIT_USERNAME = b'MC65'
 ADAFRUIT_IO_KEY = b'abc'
@@ -158,8 +151,6 @@ try:
 except Exception as e:
     print('could not connect to MQTT server {}{}'.format(type(e).__name__, e))
     sys.exit()
-
-# publish free heap statistics to Adafruit IO using MQTT
 
 def get_feed_value(feed_key):
     url = f'https://io.adafruit.com/api/v2/{ADAFRUIT_USERNAME.decode()}/feeds/{feed_key}/data/last'
@@ -188,18 +179,16 @@ def cb(topic, msg):
         print('Error processing slider value:', e)
 
 # format of feed name:  
-#   "ADAFRUIT_USERNAME/feeds/ADAFRUIT_IO_FEEDNAME"
 mqtt_feedname_temp = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'temperature'), 'utf-8')
 mqtt_feedname_OD_r = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'od.red'), 'utf-8')
 mqtt_feedname_OD_g = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'od.green'), 'utf-8')
 mqtt_feedname_OD_b = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'od.blue'), 'utf-8')
 mqtt_feedname_OD_clear = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'od.clear'), 'utf-8')
 mqtt_feedname_set = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'out.set'), 'utf-8')
+
+# subscribe
 client.set_callback(cb)
 client.subscribe(mqtt_feedname_set)
-
-###init thermistor
-#temp_sens = read_temp.init_temp_sensor()
 
 ###cooling
 cooler = cooling.CoolingSystem(cooling.TemperatureSystem)
@@ -237,10 +226,11 @@ async def main_loop():
             if accum_time_a>=COOLING_PERIOD_IN_SEC: #publish temperature and run cooling
                 # Read temperature and adjust PID
                 pid_out, P_out, I_out, power_mode_out, temperature = cooler.run_cooling_system(target_temperature)
-                #print("Recorded temperature:", temperature)
+                
                 with open("data.txt", "a") as file:
                     file.write("\t".join(str(x) for x in [time.time()-start_time, pid_out, P_out, I_out, power_mode_out, temperature])+"\n")
 
+                print("publishing temperature:", temperature)
                 client.publish(mqtt_feedname_temp, bytes(str(temperature), 'utf-8'), qos=0)
 
                 accum_time_a = -TICK_PERIOD_IN_SEC
@@ -252,9 +242,8 @@ async def main_loop():
                 accum_time_b = -TICK_PERIOD_IN_SEC
                 is_cooling = False
 
-            if accum_time_c>=wait+pump_duration+measurement_count*measurement_interval:
+            if accum_time_c>=wait+pump_duration+measurement_count*measurement_interval: #run feeding pump and publish OD measurements
                 uasyncio.create_task(measure_OD(measurement_count, measurement_interval, pump_duration))
-                #measure_OD(measurement_count, measurement_interval, pump_duration)
                 accum_time_c = -TICK_PERIOD_IN_SEC
             
             client.check_msg()
