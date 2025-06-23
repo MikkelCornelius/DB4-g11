@@ -61,18 +61,15 @@ async def measure_OD(measurement_count, measurement_interval, pump_duration):
     c_M = Conc_from_OD(avg_b)
     dV, predicted_cM, iterations = calculations.solve_for_dV(c_A, c_M, T, goal_c_M, V_A, V_M, alpha, beta)
 
-    print("Feeding")
     pump_volume(PUMP_B, dV)
-    set_pump_rate(PUMP_B, 65535)
-    await uasyncio.sleep(pump_duration)
-    print("Stopping feedstock")
-    set_pump_rate(PUMP_B, 0)
 
 
 async def pump_volume(pump, vol):
     # pump speed is 8.2 ml/second at pwm 50000 (mid power)
+    print("Feeding")
     pump.duty_u16(50000)
     await uasyncio.sleep(vol * 0.12195)
+    print("Stopping feedstock")
     pump.duty_u16(0)
 
 # From Jacob
