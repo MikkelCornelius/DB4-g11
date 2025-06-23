@@ -61,7 +61,10 @@ async def measure_OD(measurement_count, measurement_interval, pump_duration):
     c_M = Conc_from_OD(avg_b)
     dV, predicted_cM, iterations = calculations.solve_for_dV(c_A, c_M, T, goal_c_M, V_A, V_M, alpha, beta)
 
-    pump_volume(PUMP_B, dV)
+    if dV>0:
+        pump_volume(PUMP_B, dV)
+    else:
+        print("too much feed")
 
 
 async def pump_volume(pump, vol):
@@ -226,7 +229,7 @@ async def main_loop():
             if accum_time_a>=COOLING_PERIOD_IN_SEC: #publish temperature and run cooling
                 # Read temperature and adjust PID
                 pid_out, P_out, I_out, power_mode_out, temperature = cooler.run_cooling_system(target_temperature)
-                
+
                 with open("data.txt", "a") as file:
                     file.write("\t".join(str(x) for x in [time.time()-start_time, pid_out, P_out, I_out, power_mode_out, temperature])+"\n")
 
