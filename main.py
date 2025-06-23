@@ -24,49 +24,58 @@
 # User configuration parameters are indicated with "ENTER_".  
 
 import network
+import urequests
 import time
+import uasyncio
 from umqtt.robust import MQTTClient
 import os
 import sys
-from math import floor
-import read_temp
+import tcs34725
+import cooling
 from machine import I2C, Pin, ADC, PWM
 
-def color_rgb_bytes(color_raw):
-    """Read the RGB color detected by the sensor.  Returns a 3-tuple of
-    red, green, blue component values as bytes (0-255).
-    NOTE: These values are normalized against 'clear', remove the division
-    by 'clear' if you need the raw values.
-    """
-    r, g, b, clear = color_raw
-    # Avoid divide by zero errors ... if clear = 0 return black
-    if clear == 0:
-        return (0, 0, 0)
-    red   = int(pow((int((r/clear) * 256) / 255), 2.5) * 255)
-    green = int(pow((int((g/clear) * 256) / 255), 2.5) * 255)
-    blue  = int(pow((int((b/clear) * 256) / 255), 2.5) * 255)
-    # Handle possible 8-bit overflow
-    if red > 255:
-        red = 255
-    if green > 255:
-        green = 255
-    if blue > 255:
-        blue = 255
-    return (red, green, blue)
+async def measure_OD(measurement_count, measurement_interval, pump_duration):
+    print("Measuring OD")
+    # Buffers for RGB readings
+    rgb_buffer = []
+
+    for i in range(measurement_count):
+        r_raw, g_raw, b_raw, clear = rgb_sensor.read(True)
+        rgb_buffer.append((r_raw, g_raw, b_raw, clear))
+
+        await uasyncio.sleep(measurement_interval)
+
+    # Compute averages
+    avg_r     = sum(x[0] for x in rgb_buffer) / measurement_count
+    avg_g     = sum(x[1] for x in rgb_buffer) / measurement_count
+    avg_b     = sum(x[2] for x in rgb_buffer) / measurement_count
+    avg_clear = sum(x[3] for x in rgb_buffer) / measurement_count
+
+    print(f"Publishing r: {avg_r}, g: {avg_g}, b: {avg_b}, clear: {avg_clear}")
+    client.publish(mqtt_feedname_OD_r, bytes(str(avg_r), 'utf-8'), qos=0)
+    client.publish(mqtt_feedname_OD_g, bytes(str(avg_g), 'utf-8'), qos=0)
+    client.publish(mqtt_feedname_OD_b, bytes(str(avg_b), 'utf-8'), qos=0)
+    client.publish(mqtt_feedname_OD_clear, bytes(str(avg_clear), 'utf-8'), qos=0)
+
+    print("Feeding")
+    #set_pump_rate(PUMP_B, 65535)
+    await uasyncio.sleep(pump_duration)
+    print("Stopping feedstock")
+    #set_pump_rate(PUMP_B, 0)
+
 
 ### OD stuff
+# Initialize control pins
 led = Pin(27, Pin.OUT)
-# Turn it ON (set HIGH)
-led.value(1)
-pwr = Pin(14, Pin.OUT)
-pwr.value(1)  # Turn GPIO14 HIGH to "power" sensor
-
-# Define I2C
-#i2c = I2C(0, scl=Pin(22), sda=Pin(23))  # Adjust pins as needed
-#sensor = tcs34725.TCS34725(i2c)
-
 led_ctrl = Pin(33, Pin.OUT)
+pwr_rgb = Pin(14, Pin.OUT)
+blue_led = Pin(21, Pin.OUT)
+
+# Power up sensors
 led_ctrl.value(0)
+led.value(1)
+pwr_rgb.value(1)
+blue_led.value(1)
 
 ###Pumps
 
@@ -74,19 +83,14 @@ PUMP_A = PWM(Pin(26, Pin.OUT)) # A0
 PUMP_B = PWM(Pin(25, Pin.OUT)) # A1
 
 def set_pump_rate(pump, rate):
-    pump.duty_u16(floor(rate*655.35))
+    # Scale rate to account for 40% minimum threshold
+    # rate should be 0-65535, but effective range is 40-100%
+    if rate <= 26214:  # 40% of 65535
+        pump.duty_u16(0)  # Turn off pump below 40%
+    else:
+        pump.duty_u16(rate)
 
 ###Web
-
-def cb(topic, msg):
-    try:
-        slider_value = msg.decode('utf-8')
-        print('Slider value received:', slider_value)
-
-        set_pump_rate(PUMP_B, int(msg))
-        
-    except Exception as e:
-        print('Error processing slider value:', e)
 
 # WiFi connection information
 WIFI_SSID = 'iPhone'
@@ -144,48 +148,113 @@ except Exception as e:
     sys.exit()
 
 # publish free heap statistics to Adafruit IO using MQTT
-#
+
+def get_feed_value(feed_key):
+    url = f'https://io.adafruit.com/api/v2/{ADAFRUIT_USERNAME.decode()}/feeds/{feed_key}/data/last'
+    headers = {'X-AIO-Key': ADAFRUIT_IO_KEY}
+    response = urequests.get(url, headers=headers)
+    value = response.json()['value']
+    response.close()
+    try:
+        if '.' in value:
+            return float(value)
+        else:
+            return int(value)
+    except ValueError:
+        raise ValueError("Input string is not a valid int or float")
+
+def cb(topic, msg):
+    global pump_duration, wait, measurement_count, measurement_interval
+    try:
+        slider_value = msg.decode('utf-8')
+        print('Slider value received:', slider_value)
+
+        print("Requesting parameters..")
+        pump_duration, wait, measurement_count, measurement_interval = [get_feed_value(x) for x in ['out.pump-duration', 'wait', 'out.measurement-count', 'out.measurement-duration']]
+        
+    except Exception as e:
+        print('Error processing slider value:', e)
+
 # format of feed name:  
 #   "ADAFRUIT_USERNAME/feeds/ADAFRUIT_IO_FEEDNAME"
 mqtt_feedname_temp = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'temperature'), 'utf-8')
 mqtt_feedname_OD_r = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'od.red'), 'utf-8')
 mqtt_feedname_OD_g = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'od.green'), 'utf-8')
 mqtt_feedname_OD_b = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'od.blue'), 'utf-8')
-mqtt_feedname_out = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'out-test'), 'utf-8')
+mqtt_feedname_OD_clear = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'od.clear'), 'utf-8')
+mqtt_feedname_set = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'out.set'), 'utf-8')
 client.set_callback(cb)
-client.subscribe(mqtt_feedname_out)
-PUBLISH_PERIOD_IN_SEC = 10
-SUBSCRIBE_CHECK_PERIOD_IN_SEC = 0.5 
-accum_time = PUBLISH_PERIOD_IN_SEC
+client.subscribe(mqtt_feedname_set)
 
 ###init thermistor
-temp_sens = read_temp.init_temp_sensor()
+#temp_sens = read_temp.init_temp_sensor()
+
+###cooling
+cooler = cooling.CoolingSystem(cooling.TemperatureSystem)
+set_pump_rate(PUMP_A, 65535)
+is_cooling = False
+
+with open("data.txt", "a") as file:
+    file.write("\t".join(["Time", "PID", "P", "I", "Mode", "Temp"])+"\n")
+
+###sensor setup
+i2c = I2C(0, scl=Pin(22), sda=Pin(23))
+rgb_sensor = tcs34725.TCS34725(i2c)
+rgb_sensor.gain(60)
+rgb_sensor.integration_time(154)
 
 ###loop
-print('Publishing..')
-while True:
-    try:
-        if accum_time>=PUBLISH_PERIOD_IN_SEC:
-            # Read temperature
-            temp = read_temp.read_temp(temp_sens)
-            print("Recorded temperature:", temp)
+async def main_loop():
+    global measurement_count, measurement_interval, pump_duration
+    accum_time_a = COOLING_PERIOD_IN_SEC
+    accum_time_b = 0
+    accum_time_c = OD_PERIOD_IN_SEC
+    start_time = time.time()
+    while True:
+        try:
+            current_time = time.time()
+            if accum_time_a>=COOLING_PERIOD_IN_SEC: #publish temperature and run cooling
+                # Read temperature and adjust PID
+                pid_out, P_out, I_out, power_mode_out, temperature = cooler.run_cooling_system(target_temperature)
+                #print("Recorded temperature:", temperature)
+                with open("data.txt", "a") as file:
+                    file.write("\t".join(str(x) for x in [time.time()-start_time, pid_out, P_out, I_out, power_mode_out, temperature])+"\n")
 
-            # Read color sensor
-            #r,g,b = color_rgb_bytes(sensor.read(True))
-            #print("RGB values:", r,g,b)
+                client.publish(mqtt_feedname_temp, bytes(str(temperature), 'utf-8'), qos=0)
+
+                accum_time_a = -TICK_PERIOD_IN_SEC
+                accum_time_b = -TICK_PERIOD_IN_SEC
+                is_cooling = True
+
+            if accum_time_b>=COOLING_PERIOD_IN_SEC*cooler.duty_cycle and is_cooling: #turn off cooling after some time
+                cooler.disable_cooling_system()
+                accum_time_b = -TICK_PERIOD_IN_SEC
+                is_cooling = False
+
+            if accum_time_c>=wait+pump_duration+measurement_count*measurement_interval:
+                uasyncio.create_task(measure_OD(measurement_count, measurement_interval, pump_duration))
+                #measure_OD(measurement_count, measurement_interval, pump_duration)
+                accum_time_c = -TICK_PERIOD_IN_SEC
             
-            client.publish(mqtt_feedname_temp, bytes(str(temp), 'utf-8'), qos=0)
-            #client.publish(mqtt_feedname_OD_r, bytes(str(r), 'utf-8'), qos=0)
-            #client.publish(mqtt_feedname_OD_g, bytes(str(g), 'utf-8'), qos=0)
-            #client.publish(mqtt_feedname_OD_b, bytes(str(b), 'utf-8'), qos=0)
+            client.check_msg()
+            
+            await uasyncio.sleep(TICK_PERIOD_IN_SEC)
+            accum_time = time.time()-current_time
+            accum_time_a += accum_time
+            accum_time_b += accum_time
+            accum_time_c += accum_time
+            print(accum_time_c)
+        except KeyboardInterrupt:
+            print('Ctrl-C pressed...exiting')
+            client.disconnect()
+            sys.exit()
 
-            accum_time = 0
-        
-        client.check_msg()
-        
-        time.sleep(SUBSCRIBE_CHECK_PERIOD_IN_SEC)
-        accum_time += SUBSCRIBE_CHECK_PERIOD_IN_SEC
-    except KeyboardInterrupt:
-        print('Ctrl-C pressed...exiting')
-        client.disconnect()
-        sys.exit()
+print("Requesting parameters..")
+pump_duration, wait, measurement_count, measurement_interval = [get_feed_value(x) for x in ['out.pump-duration', 'out.wait', 'out.measurement-count', 'out.measurement-duration']]
+target_temperature = 18
+COOLING_PERIOD_IN_SEC = 10
+OD_PERIOD_IN_SEC = wait
+TICK_PERIOD_IN_SEC = 0.5 
+
+print('Publishing..')
+uasyncio.run(main_loop())
