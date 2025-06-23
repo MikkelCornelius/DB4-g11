@@ -59,8 +59,8 @@ async def measure_OD(measurement_count, measurement_interval, pump_duration):
     client.publish(mqtt_feedname_OD_clear, bytes(str(avg_clear), 'utf-8'), qos=0)
 
     c_M = Conc_from_OD(avg_b)
-    dV, predicted_cM, iterations = calculations.solve_for_dV(c_A, c_M, T, goal_c_M, V_A, V_M, alpha, beta)
-
+    dV, immediate_cM, predicted_cM, iterations = calculations.solve_for_dV(c_A, c_M, T, goal_c_M, V_A, V_M, alpha, beta)
+    print(f"t = {time.ticks_ms()/1000}, cM = {c_M}, dV = {dV}")
     if dV>0:
         pump_volume(PUMP_B, dV)
     else:
@@ -102,6 +102,10 @@ blue_led.value(1)
 #Pumps
 PUMP_A = PWM(Pin(26, Pin.OUT)) # A0
 PUMP_B = PWM(Pin(25, Pin.OUT)) # A1
+
+# Led strip
+led_strip = PWM(Pin(17, Pin.OUT))
+led_strip.duty_u16(16384) # 25 percent strength
 
 ###Web
 
