@@ -32,6 +32,7 @@ import os
 import sys
 import tcs34725
 import cooling
+import calculations
 from machine import I2C, Pin, ADC, PWM
 
 async def measure_OD(measurement_count, measurement_interval, pump_duration):
@@ -57,12 +58,26 @@ async def measure_OD(measurement_count, measurement_interval, pump_duration):
     client.publish(mqtt_feedname_OD_b, bytes(str(avg_b), 'utf-8'), qos=0)
     client.publish(mqtt_feedname_OD_clear, bytes(str(avg_clear), 'utf-8'), qos=0)
 
+    c_M = Conc_from_OD(avg_b)
+    dV, predicted_cM, iterations = calculations.solve_for_dV(c_A, c_M, T, goal_c_M, V_A, V_M, alpha, beta)
+
     print("Feeding")
-    #set_pump_rate(PUMP_B, 65535)
+    pump_volume(PUMP_B, dV)
+    set_pump_rate(PUMP_B, 65535)
     await uasyncio.sleep(pump_duration)
     print("Stopping feedstock")
-    #set_pump_rate(PUMP_B, 0)
+    set_pump_rate(PUMP_B, 0)
 
+
+async def pump_volume(pump, vol):
+    # pump speed is 8.2 ml/second at pwm 50000 (mid power)
+    pump.duty_u16(50000)
+    await uasyncio.sleep(vol * 0.12195)
+    pump.duty_u16(0)
+
+# From Jacob
+def Conc_from_OD(Blue):
+    return -114.9880 * Blue + 248932.3866
 
 ### OD stuff
 # Initialize control pins
@@ -202,6 +217,15 @@ i2c = I2C(0, scl=Pin(22), sda=Pin(23))
 rgb_sensor = tcs34725.TCS34725(i2c)
 rgb_sensor.gain(60)
 rgb_sensor.integration_time(154)
+
+###concentration calculations
+V_A = 2000 # change this possibly (mL)
+V_M = 5000 # mL
+alpha = 1130
+beta = 4.45/60*1000  # mL/min
+c_A = 15000
+T = 12   # min
+goal_c_M = alpha
 
 ###loop
 async def main_loop():
