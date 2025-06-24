@@ -70,7 +70,7 @@ KP = const(1)
 KI = const(0.0001)
 KD = const(0) #set to 0 because of the high level of noise from the temperature sensor
 Imax = 1
-target_temperature = 17
+target_temperature = 18
 
 class CoolingSystem(TemperatureSystem):
     def __init__(self, TemperatureSystem):
@@ -86,6 +86,8 @@ class CoolingSystem(TemperatureSystem):
         self.last_error = 0
         self.integral = 0
         self.last_time = 0
+
+        self.relays_on = []
 
         #for the running function
         TemperatureSystem.__init__(self)
@@ -104,6 +106,8 @@ class CoolingSystem(TemperatureSystem):
         # Integral term (only active near setpoint + clamped to ±1)
         if abs(error) <= 1.2:  # Only integrate if within 1.2°C of target
             self.integral += error * dt
+        else:
+            self.integral = 0
 
         I = KI * self.integral
         I = max(min(I, 1.0), -1.0) # Hard clamp to ±1
@@ -120,6 +124,8 @@ class CoolingSystem(TemperatureSystem):
         self.last_error = error
         self.last_time = now
 
+        print(f"output = {output}, PID = {PID}, I  is {I}")
+
         return output, PID, P, I
 
     def disable_cooling_system(self):
@@ -134,17 +140,17 @@ class CoolingSystem(TemperatureSystem):
             return
 
         # Determine which relays should be on based on power mode
-        relays_on = []
+        self.relays_on = []
         if self.current_power_mode == 'low':
-            relays_on = [self.relay1]
+            self.relays_on = [self.relay1]
         elif self.current_power_mode == 'high' or 'eco':
-            relays_on = [self.relay1, self.relay2]
+            self.relays_on = [self.relay1, self.relay2]
 
         # Duty cycle implementation
         cycle_time = 10  # seconds
         on_time = cycle_time * self.duty_cycle
 
-        for relay in relays_on:
+        for relay in self.relays_on:
             relay.on()
 
     def set_cooling(self, required_power, PID):
@@ -155,14 +161,21 @@ class CoolingSystem(TemperatureSystem):
         new_power_mode = self.current_power_mode
         if time.ticks_diff(now, self.last_switch_time) > self.min_mode_time:
             if required_power > LOW_POWER_MAX and self.current_power_mode != 'high':
+                print("high statement correct")
                 if PID > 2.3:
                     new_power_mode = 'high'
-            elif required_power > LOW_POWER_MAX and self.current_power_mode != 'eco':
+            if required_power > LOW_POWER_MAX and self.current_power_mode != 'eco':
+                print("eco statement correct")
+
                 if PID <= 2.3:
                     new_power_mode = 'eco'
-            elif -0.3 < required_power < HIGH_POWER_MIN and self.current_power_mode != 'low':
+            if required_power < HIGH_POWER_MIN and self.current_power_mode != 'low':
+                print("low statement correct")
+
                 new_power_mode = 'low'
-            elif required_power <= -0.3:
+            if required_power <= -0.3:
+                print("off statement correct")
+
                 new_power_mode = 'off'
 
         # Apply new power mode if changed
@@ -176,17 +189,17 @@ class CoolingSystem(TemperatureSystem):
             self.duty_cycle = 0
             set_pump_rate(PUMP_A, 0)
             print("pump off")
-        elif self.current_power_mode == 'low':
+        if self.current_power_mode == 'low':
             effective_power = min(required_power / LOW_POWER_MAX, 1.0)
             self.duty_cycle = max(MIN_DUTY_CYCLE, effective_power)
             set_pump_rate(PUMP_A, 58982)
             print(f"pump on | low power | duty cycle {self.duty_cycle}")
-        elif self.current_power_mode == 'eco':
+        if self.current_power_mode == 'eco':
             effective_power = (required_power - LOW_POWER_MAX) / (1 - LOW_POWER_MAX)
             self.duty_cycle = max(MIN_DUTY_CYCLE, effective_power)
             set_pump_rate(PUMP_A, 64225)
             print(f"pump on | eco power | duty cycle {self.duty_cycle}")
-        else:  # high power mode
+        if self.current_power_mode == "high":  # high power mode
             effective_power = (required_power - LOW_POWER_MAX) / (1 - LOW_POWER_MAX)
             self.duty_cycle = max(MIN_DUTY_CYCLE, effective_power)
             set_pump_rate(PUMP_A, 65535)
@@ -199,6 +212,7 @@ class CoolingSystem(TemperatureSystem):
     def run_cooling_system(self, target_temperature):
 
         current_temperature = self.read_temp()
+        print(f"current temperature is {current_temperature}")
         if  current_temperature - target_temperature <= -0.5:
             set_pump_rate(PUMP_A, 0)
             print("pump off")
@@ -206,4 +220,40 @@ class CoolingSystem(TemperatureSystem):
         output, pid, P_values, I_values = self.pid_control(current_temperature, target_temperature)
         power_mode_values = self.set_cooling(round(output, 1), pid)
 
-        return output, P_values, I_values, power_mode_values, current_temperature
+        return pid, P_values, I_values, power_mode_values, current_temperature
+
+
+
+duration = 72000 #s
+start_time = time.time()
+elapsed = time.time() - start_time
+time_points = []
+pid_values = []
+P_values = []
+I_values = []
+D_values = []
+power_mode_values = []
+temperature_points = []
+cooler = CoolingSystem(TemperatureSystem)
+
+with open("data.txt", "a") as file:
+    file.write("\t".join(["Time", "PID", "P", "I", "Mode", "Temp", "Target"])+"\n")
+
+if __name__ == "__main__":
+    print(f"Running for {duration} s")
+    while elapsed < duration:
+        try:
+            print(f"Elapsed time: {elapsed:.1f}s")
+
+            time.sleep(1)
+
+            elapsed = time.time() - start_time
+            pid_out, P_out, I_out, power_mode_out, temperature_out = cooler.run_cooling_system(target_temperature)
+
+            with open("data.txt", "a") as file:
+                file.write("\t".join(str(x) for x in [pid_out, P_out, I_out, power_mode_out, temperature_out, target_temperature])+"\n")
+        except Exception as e:
+            print(e)
+            with open("error_log.txt", "a") as file:
+                file.write("Timepoint: "+str(time.localtime())+"\nElapsed: "+str(elapsed)+"\n"+str(e))
+            break

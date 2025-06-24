@@ -35,7 +35,10 @@ import cooling
 import calculations
 from machine import I2C, Pin, ADC, PWM
 
+
 async def measure_OD(measurement_count, measurement_interval, pump_duration):
+    global is_measuring_od_rn, last_feeding_time, c_M
+    is_measuring_od_rn = True
     print("Measuring OD")
     # Buffers for RGB readings
     rgb_buffer = []
@@ -58,20 +61,29 @@ async def measure_OD(measurement_count, measurement_interval, pump_duration):
     client.publish(mqtt_feedname_OD_b, bytes(str(avg_b), 'utf-8'), qos=0)
     client.publish(mqtt_feedname_OD_clear, bytes(str(avg_clear), 'utf-8'), qos=0)
 
-    c_M = Conc_from_OD(avg_b)
-    dV, immediate_cM, predicted_cM, iterations = calculations.solve_for_dV(c_A, c_M, T, goal_c_M, V_A, V_M, alpha, beta)
-    print(f"t = {time.ticks_ms()/1000}, cM = {c_M}, dV = {dV}")
-    if dV>0:
-        pump_volume(PUMP_B, dV)
-    else:
-        print("too much feed")
+    c_A = Conc_from_OD(avg_b)
+    print(f"t = {time.ticks_ms()/1000}, c(Algae) = {c_A}")
+    file_od.write("\t".join(str(x) for x in [time.ticks_ms(), avg_b, c_A])+"\n")
+    file_od.flush()
+    if time.ticks_ms() - last_feeding_time > (T*60000):
+        dV, immediate_cM, predicted_cM, iterations = calculations.solve_for_dV(c_A, c_M, T, goal_c_M, V_A, V_M, alpha, beta)
+        print(f"t = {time.ticks_ms()/1000}, Feeding: dV = {dV}, immediate_cM = {immediate_cM}, predicted_cm = {predicted_cM}, period = {T*60} s")
+        if dV>0 and dV<200000:
+            file_od.write("\t".join(str(x) for x in [time.ticks_ms(), avg_b, c_A, c_M, immediate_cM, dV])+"\n")
+            file_od.flush()
+            await pump_volume(PUMP_B, dV)
+        else:
+            print("simulation failed: got negative result")
+        c_M = predicted_cM # set global to predicted
+        last_feeding_time = time.ticks_ms()
+    is_measuring_od_rn = False
 
 
 async def pump_volume(pump, vol):
-    # pump speed is 8.2 ml/second at pwm 50000 (mid power)
+    # pump speed is 18.5 ml/second at max power
     print("Feeding")
-    pump.duty_u16(50000)
-    await uasyncio.sleep(vol * 0.12195)
+    pump.duty_u16(65535)
+    await uasyncio.sleep(vol * 0.054)
     print("Stopping feedstock")
     pump.duty_u16(0)
 
@@ -100,8 +112,9 @@ pwr_rgb.value(1)
 blue_led.value(1)
 
 #Pumps
-PUMP_A = PWM(Pin(26, Pin.OUT)) # A0
+#PUMP_A = PWM(Pin(26, Pin.OUT)) # A0
 PUMP_B = PWM(Pin(25, Pin.OUT)) # A1
+PUMP_B.duty_u16(0)
 
 # Led strip
 led_strip = PWM(Pin(17, Pin.OUT))
@@ -199,11 +212,13 @@ client.subscribe(mqtt_feedname_set)
 
 ###cooling
 cooler = cooling.CoolingSystem(cooling.TemperatureSystem)
-set_pump_rate(PUMP_A, 65535)
 is_cooling = False
 
-with open("data.txt", "a") as file:
-    file.write("\t".join(["Time", "PID", "P", "I", "Mode", "Temp"])+"\n")
+file_pid = open("data_pid.txt", "a")
+file_pid.write("\t".join(["Time", "PID", "P", "I", "Mode", "Temp"])+"\n")
+
+file_od = open("data_od.txt", "a")
+file_od.write("\t".join(["Time", "B_sensor", "cA", "cM_calculated", "cM_postfeed", "dV"])+"\n")
 
 ###sensor setup
 i2c = I2C(0, scl=Pin(22), sda=Pin(23))
@@ -212,21 +227,25 @@ rgb_sensor.gain(60)
 rgb_sensor.integration_time(154)
 
 ###concentration calculations
-V_A = 2000 # change this possibly (mL)
-V_M = 5000 # mL
+V_A = 4000 # change this possibly (mL)
+V_M = 4000 # mL
 alpha = 1130
 beta = 4.45/60*1000  # mL/min
-c_A = 15000
-T = 12   # min
+c_M = 0 # initially zero
+T = 5   # min
 goal_c_M = alpha
+
+is_measuring_od_rn = False
+last_feeding_time = -(T*60000)
 
 ###loop
 async def main_loop():
-    global measurement_count, measurement_interval, pump_duration
+    global measurement_count, measurement_interval, pump_duration, is_measuring_od_rn
     accum_time_a = COOLING_PERIOD_IN_SEC
     accum_time_b = 0
     accum_time_c = OD_PERIOD_IN_SEC
     start_time = time.time()
+
     while True:
         try:
             current_time = time.time()
@@ -234,8 +253,8 @@ async def main_loop():
                 # Read temperature and adjust PID
                 pid_out, P_out, I_out, power_mode_out, temperature = cooler.run_cooling_system(target_temperature)
 
-                with open("data.txt", "a") as file:
-                    file.write("\t".join(str(x) for x in [time.time()-start_time, pid_out, P_out, I_out, power_mode_out, temperature])+"\n")
+                file_pid.write("\t".join(str(x) for x in [time.time()-start_time, pid_out, P_out, I_out, power_mode_out, temperature])+"\n")
+                file_pid.flush()
 
                 print("publishing temperature:", temperature)
                 client.publish(mqtt_feedname_temp, bytes(str(temperature), 'utf-8'), qos=0)
@@ -249,7 +268,8 @@ async def main_loop():
                 accum_time_b = -TICK_PERIOD_IN_SEC
                 is_cooling = False
 
-            if accum_time_c>=wait+pump_duration+measurement_count*measurement_interval: #run feeding pump and publish OD measurements
+            if accum_time_c>=wait+pump_duration+measurement_count*measurement_interval and not is_measuring_od_rn: #run feeding pump and publish OD measurements
+                is_measuring_od_rn = True
                 uasyncio.create_task(measure_OD(measurement_count, measurement_interval, pump_duration))
                 accum_time_c = -TICK_PERIOD_IN_SEC
             
@@ -260,7 +280,7 @@ async def main_loop():
             accum_time_a += accum_time
             accum_time_b += accum_time
             accum_time_c += accum_time
-            print(accum_time_c)
+            #print(accum_time_c)
         except KeyboardInterrupt:
             print('Ctrl-C pressed...exiting')
             client.disconnect()
