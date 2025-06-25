@@ -1,5 +1,6 @@
 import time
 import ustruct
+import math
 
 #const = lambda x:x
 
@@ -96,6 +97,20 @@ class TCS34725:
 
     def _valid(self):
         return bool(self._register8(_REGISTER_STATUS) & 0x01)
+
+    def read_mock(self, _):
+        import random
+        def random_gaussian():
+            while True:
+                u = random.uniform(-1, 1)
+                v = random.uniform(-1, 1)
+                s = u**2 + v**2
+                if s == 0 or s >= 1:
+                    continue
+                z = math.sqrt( -2 * math.log(s) / s )
+                return u * z, v * z
+        s1, s2 = random_gaussian()
+        return int(500+s1*100), int(700+s1*100), int(1800+s2*200), int(2800+s2*200) # 500, 700, 1800, 2800
 
     def read(self, raw=False):
         was_active = self.active()

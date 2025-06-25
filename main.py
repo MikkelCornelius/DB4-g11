@@ -34,6 +34,7 @@ import tcs34725
 import cooling
 import calculations
 from machine import I2C, Pin, ADC, PWM
+import machine
 
 
 async def measure_OD(measurement_count, measurement_interval, pump_duration):
@@ -62,20 +63,25 @@ async def measure_OD(measurement_count, measurement_interval, pump_duration):
     client.publish(mqtt_feedname_OD_clear, bytes(str(avg_clear), 'utf-8'), qos=0)
 
     c_A = Conc_from_OD(avg_b)
-    print(f"t = {time.ticks_ms()/1000}, c(Algae) = {c_A}")
+    client.publish(mqtt_feedname_concentration, bytes(str(c_A), 'utf-8'), qos=0)
+    print(f"t = {time.ticks_ms()/1000}, Red = {avg_r}, Blue = {avg_b}, c(Algae) = {c_A}")
     file_od.write("\t".join(str(x) for x in [time.ticks_ms(), avg_b, c_A])+"\n")
     file_od.flush()
     if time.ticks_ms() - last_feeding_time > (T*60000):
-        dV, immediate_cM, predicted_cM, iterations = calculations.solve_for_dV(c_A, c_M, T, goal_c_M, V_A, V_M, alpha, beta)
-        print(f"t = {time.ticks_ms()/1000}, Feeding: dV = {dV}, immediate_cM = {immediate_cM}, predicted_cm = {predicted_cM}, period = {T*60} s")
-        if dV>0 and dV<200000:
-            file_od.write("\t".join(str(x) for x in [time.ticks_ms(), avg_b, c_A, c_M, immediate_cM, dV])+"\n")
-            file_od.flush()
-            await pump_volume(PUMP_B, dV)
+        if not auto_control: # manual
+            print(f"t = {time.ticks_ms()/1000}, Feeding: dV = {pump_duration / 0.054}")
+            await pump_volume(PUMP_B, pump_duration / 0.054)
         else:
-            print("simulation failed: got negative result")
-        c_M = predicted_cM # set global to predicted
-        last_feeding_time = time.ticks_ms()
+            dV, immediate_cM, predicted_cM, iterations = calculations.solve_for_dV(c_A, c_M, T, goal_c_M, V_A, V_M, alpha, beta)
+            print(f"t = {time.ticks_ms()/1000}, Feeding: dV = {dV}, immediate_cM = {immediate_cM}, predicted_cm = {predicted_cM}, period = {T*60} s")
+            if dV>0 and dV<300000:
+                file_od.write("\t".join(str(x) for x in [time.ticks_ms(), avg_b, c_A, c_M, immediate_cM, dV])+"\n")
+                file_od.flush()
+                await pump_volume(PUMP_B, dV)
+                c_M = predicted_cM # set global to predicted
+            else:
+                print("simulation failed: got negative result")
+            last_feeding_time = time.ticks_ms()
     is_measuring_od_rn = False
 
 
@@ -87,9 +93,8 @@ async def pump_volume(pump, vol):
     print("Stopping feedstock")
     pump.duty_u16(0)
 
-# From Jacob
 def Conc_from_OD(Blue):
-    return -114.9880 * Blue + 248932.3866
+    return ( -114.9880 * Blue + 248932.3866 ) * 0.2067604 # Last minute scaling factor
 
 def set_pump_rate(pump, rate):
     # Scale rate to account for 40% minimum threshold
@@ -118,7 +123,7 @@ PUMP_B.duty_u16(0)
 
 # Led strip
 led_strip = PWM(Pin(17, Pin.OUT))
-led_strip.duty_u16(16384) # 25 percent strength
+#led_strip.duty_u16(16384) # 25 percent strength
 
 ###Web
 
@@ -187,28 +192,53 @@ def get_feed_value(feed_key):
         raise ValueError("Input string is not a valid int or float")
 
 def cb(topic, msg):
-    global pump_duration, wait, measurement_count, measurement_interval
+    global pump_duration, T, auto_control
     try:
-        slider_value = msg.decode('utf-8')
-        print('Slider value received:', slider_value)
+        msg_value = msg.decode('utf-8')
+        #print('Message received:', msg_value)
 
-        print("Requesting parameters..")
-        pump_duration, wait, measurement_count, measurement_interval = [get_feed_value(x) for x in ['out.pump-duration', 'wait', 'out.measurement-count', 'out.measurement-duration']]
+        if topic == f'{ADAFRUIT_USERNAME.decode()}/feeds/out.manual'.encode():
+            if msg_value==0:
+                print("Switching to manual control")
+            else:
+                print("Switching to auto feeding")
+            auto_control = msg_value==1
+        elif topic == f'{ADAFRUIT_USERNAME.decode()}/feeds/out.pump-duration'.encode():
+            pump_duration = int(msg_value)
+            print(f"Setting `pump_duration` to {pump_duration}")
+        elif topic == f'{ADAFRUIT_USERNAME.decode()}/feeds/out.wait'.encode():
+            T = int(msg_value)
+            print(f"Setting `T` to {T}")
+        elif topic == f'{ADAFRUIT_USERNAME.decode()}/feeds/out.light-strip'.encode():
+            light_duty = round(int(msg_value) * 655.35)
+            led_strip.duty_u16(light_duty)
+            print(f"Setting `light_duty` to {light_duty}")
+        else: #error
+            print("unrecognized topic")
+            print("Topic:", topic)
         
     except Exception as e:
         print('Error processing slider value:', e)
 
-# format of feed name:  
+# format of feed name:
 mqtt_feedname_temp = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'temperature'), 'utf-8')
 mqtt_feedname_OD_r = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'od.red'), 'utf-8')
 mqtt_feedname_OD_g = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'od.green'), 'utf-8')
 mqtt_feedname_OD_b = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'od.blue'), 'utf-8')
-mqtt_feedname_OD_clear = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'od.clear'), 'utf-8')
-mqtt_feedname_set = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'out.set'), 'utf-8')
+mqtt_feedname_concentration = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'od.concentration'), 'utf-8')
+#mqtt_feedname_OD_clear = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'od.clear'), 'utf-8')
+#mqtt_feedname_set = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'out.set'), 'utf-8')
+mqtt_feedname_pump_duration = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'out.pump-duration'), 'utf-8')
+mqtt_feedname_pump_wait = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'out.wait'), 'utf-8')
+mqtt_feedname_manual = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'out.manual'), 'utf-8')
+mqtt_feedname_light = bytes('{:s}/feeds/{:s}'.format(ADAFRUIT_USERNAME, b'out.light-strip'), 'utf-8')
 
 # subscribe
 client.set_callback(cb)
-client.subscribe(mqtt_feedname_set)
+client.subscribe(mqtt_feedname_pump_duration)
+client.subscribe(mqtt_feedname_pump_wait)
+client.subscribe(mqtt_feedname_manual)
+client.subscribe(mqtt_feedname_light)
 
 ###cooling
 cooler = cooling.CoolingSystem(cooling.TemperatureSystem)
@@ -231,9 +261,13 @@ V_A = 4000 # change this possibly (mL)
 V_M = 4000 # mL
 alpha = 1130
 beta = 4.45/60*1000  # mL/min
-c_M = 0 # initially zero
-T = 5   # min
-goal_c_M = alpha
+c_M = 1000 # initially zero
+goal_c_M = alpha - 100
+
+auto_control = True
+pump_duration = 4
+T = 30   # min
+light_duty = 16384
 
 is_measuring_od_rn = False
 last_feeding_time = -(T*60000)
@@ -287,7 +321,23 @@ async def main_loop():
             sys.exit()
 
 print("Requesting parameters..")
-pump_duration, wait, measurement_count, measurement_interval = [get_feed_value(x) for x in ['out.pump-duration', 'out.wait', 'out.measurement-count', 'out.measurement-duration']]
+try:
+    pump_duration = get_feed_value('out.pump-duration')
+    T = get_feed_value('out.wait')
+    auto_control = get_feed_value('out.manual')
+    light_duty = round(get_feed_value('out.light-strip') * 655.35)
+except Exception as e:
+    print("Failed requesting parameters. Defaulting to placeholder values")
+    print("Error report:", e)
+    auto_control = True
+    pump_duration = 4
+    T = 30   # min
+    light_duty = 16384
+
+led_strip.duty_u16(light_duty)
+wait = 60
+measurement_count = 20
+measurement_interval = 0.1
 target_temperature = 18
 COOLING_PERIOD_IN_SEC = 10
 OD_PERIOD_IN_SEC = wait

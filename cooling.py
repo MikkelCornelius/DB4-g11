@@ -70,7 +70,7 @@ KP = const(1)
 KI = const(0.0001)
 KD = const(0) #set to 0 because of the high level of noise from the temperature sensor
 Imax = 1
-target_temperature = 18
+target_temperature = 17
 
 class CoolingSystem(TemperatureSystem):
     def __init__(self, TemperatureSystem):
@@ -162,12 +162,12 @@ class CoolingSystem(TemperatureSystem):
         if time.ticks_diff(now, self.last_switch_time) > self.min_mode_time:
             if required_power > LOW_POWER_MAX and self.current_power_mode != 'high':
                 print("high statement correct")
-                if PID > 2.3:
+                if PID > 3.8:
                     new_power_mode = 'high'
             if required_power > LOW_POWER_MAX and self.current_power_mode != 'eco':
                 print("eco statement correct")
 
-                if PID <= 2.3:
+                if PID <= 3.8:
                     new_power_mode = 'eco'
             if required_power < HIGH_POWER_MIN and self.current_power_mode != 'low':
                 print("low statement correct")
